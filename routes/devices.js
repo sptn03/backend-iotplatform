@@ -1,117 +1,196 @@
 const express = require('express');
-const { body, validationResult, param } = require('express-validator');
+const router = express.Router();
+const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
+const { authMiddleware: auth } = require('../middleware/auth');
 const db = require('../config/database');
-const { deviceOwnerMiddleware } = require('../middleware/auth');
 const mqttService = require('../services/mqttService');
 
-const router = express.Router();
-
-// Validation rules
-const deviceValidation = [
-  body('device_id').trim().isLength({ min: 1 }).withMessage('Device ID is required'),
-  body('name').trim().isLength({ min: 1 }).withMessage('Device name is required'),
-  body('description').optional().trim(),
-  body('location').optional().trim(),
-  body('room').optional().trim()
-];
+// ===========================
+// ESP32 BOARDS MANAGEMENT
+// ===========================
 
 /**
  * @swagger
- * /api/devices:
+ * /api/boards:
  *   get:
- *     summary: Get all user devices
- *     tags: [Devices]
+ *     summary: Get all ESP32 boards for user
+ *     tags: [ESP32 Boards]
  *     security:
  *       - bearerAuth: []
  *     responses:
  *       200:
- *         description: Devices retrieved successfully
+ *         description: List of ESP32 boards
  */
-router.get('/', async (req, res) => {
+router.get('/boards', auth, async (req, res) => {
   try {
-    const devices = await db.query(`
-      SELECT 
-        d.*,
-        CASE 
-          WHEN d.user_id = ? THEN 'owner'
-          ELSE 'shared'
-        END as access_type,
-        CASE 
-          WHEN d.user_id != ? THEN ds.permissions
-          ELSE NULL
-        END as shared_permissions
-      FROM devices d
-      LEFT JOIN device_sharing ds ON d.id = ds.device_id AND ds.shared_with_id = ? AND ds.is_active = true
-      WHERE d.user_id = ? OR ds.id IS NOT NULL
-      ORDER BY d.created_at DESC
-    `, [req.user.id, req.user.id, req.user.id, req.user.id]);
+    const boards = await db.query(`
+      SELECT b.*, 
+             COUNT(d.id) as device_count,
+             GROUP_CONCAT(d.device_type) as device_types
+      FROM esp32_boards b
+      LEFT JOIN devices d ON b.board_id = d.board_id AND d.is_enabled = 1
+      WHERE b.user_id = ?
+      GROUP BY b.id
+      ORDER BY b.created_at DESC
+    `, [req.user.id]);
 
-    res.json({
-      success: true,
-      data: {
-        devices,
-        total: devices.length
-      }
-    });
-
+    res.json({ success: true, data: boards });
   } catch (error) {
-    console.error('Get devices error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
+    console.error('❌ Error fetching boards:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch boards' });
   }
 });
 
 /**
  * @swagger
- * /api/devices/{id}:
+ * /api/boards/{boardId}:
  *   get:
- *     summary: Get device by ID
- *     tags: [Devices]
+ *     summary: Get ESP32 board details with devices
+ *     tags: [ESP32 Boards]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: id
+ *         name: boardId
  *         required: true
  *         schema:
- *           type: integer
+ *           type: string
  *     responses:
  *       200:
- *         description: Device retrieved successfully
- *       404:
- *         description: Device not found
+ *         description: Board details with devices
  */
-router.get('/:deviceId', deviceOwnerMiddleware, async (req, res) => {
+router.get('/boards/:boardId', auth, async (req, res) => {
   try {
-    const devices = await db.query(`
-      SELECT d.*, u.first_name, u.last_name, u.email as owner_email
-      FROM devices d
-      JOIN users u ON d.user_id = u.id
-      WHERE d.id = ?
-    `, [req.params.deviceId]);
+    const [board] = await db.query(`
+      SELECT * FROM esp32_boards 
+      WHERE board_id = ? AND user_id = ?
+    `, [req.params.boardId, req.user.id]);
 
-    if (devices.length === 0) {
-      return res.status(404).json({
-        success: false,
-        message: 'Device not found'
-      });
+    if (!board) {
+      return res.status(404).json({ success: false, message: 'Board not found' });
     }
 
-    res.json({
-      success: true,
-      data: {
-        device: devices[0]
-      }
-    });
+    const devices = await db.query(`
+      SELECT * FROM devices 
+      WHERE board_id = ? 
+      ORDER BY gpio_pin
+    `, [req.params.boardId]);
 
+    res.json({ success: true, data: { board, devices } });
   } catch (error) {
-    console.error('Get device error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
+    console.error('❌ Error fetching board details:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch board details' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/boards/{boardId}:
+ *   put:
+ *     summary: Update ESP32 board
+ *     tags: [ESP32 Boards]
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: boardId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *               location:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Board updated successfully
+ */
+router.put('/boards/:boardId', auth, async (req, res) => {
+  try {
+    const { name, location } = req.body;
+
+    // Check if board exists and belongs to user
+    const [board] = await db.query(`
+      SELECT * FROM esp32_boards 
+      WHERE board_id = ? AND user_id = ?
+    `, [req.params.boardId, req.user.id]);
+
+    if (!board) {
+      return res.status(404).json({ success: false, message: 'Board not found' });
+    }
+
+    // Check if board is online
+    if (!board.is_online) {
+      return res.status(400).json({ success: false, message: 'Board is offline. Cannot update.' });
+    }
+
+    // Update board
+    await db.query(`
+      UPDATE esp32_boards 
+      SET name = ?, location = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE board_id = ?
+    `, [name, location, req.params.boardId]);
+
+    // Send update command to ESP32
+    const updateCommand = {
+      cmd: 'update_board',
+      data: { name, location }
+    };
+
+    const commandId = await mqttService.sendCommand(req.params.boardId, 'config', updateCommand);
+    
+    // Wait for acknowledgment
+    const ackReceived = await mqttService.waitForAck(commandId, 10000); // 10 second timeout
+    
+    if (!ackReceived) {
+      return res.status(408).json({ success: false, message: 'Board did not acknowledge update. Changes may not be applied.' });
+    }
+
+    res.json({ success: true, message: 'Board updated successfully' });
+  } catch (error) {
+    console.error('❌ Error updating board:', error);
+    res.status(500).json({ success: false, message: 'Failed to update board' });
+  }
+});
+
+// ===========================
+// DEVICES MANAGEMENT
+// ===========================
+
+/**
+ * @swagger
+ * /api/devices:
+ *   get:
+ *     summary: Get all devices for user
+ *     tags: [Devices]
+ *     security:
+ *       - bearerAuth: []
+ *     responses:
+ *       200:
+ *         description: List of devices
+ */
+router.get('/', auth, async (req, res) => {
+  try {
+    const devices = await db.query(`
+      SELECT d.*, b.name as board_name, b.location as board_location, b.is_online as board_online
+      FROM devices d
+      JOIN esp32_boards b ON d.board_id = b.board_id
+      WHERE b.user_id = ? AND d.is_enabled = 1
+      ORDER BY b.name, d.gpio_pin
+    `, [req.user.id]);
+
+    res.json({ success: true, data: devices });
+  } catch (error) {
+    console.error('❌ Error fetching devices:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch devices' });
   }
 });
 
@@ -119,7 +198,7 @@ router.get('/:deviceId', deviceOwnerMiddleware, async (req, res) => {
  * @swagger
  * /api/devices:
  *   post:
- *     summary: Register a new device
+ *     summary: Add new device to ESP32 board
  *     tags: [Devices]
  *     security:
  *       - bearerAuth: []
@@ -130,99 +209,118 @@ router.get('/:deviceId', deviceOwnerMiddleware, async (req, res) => {
  *           schema:
  *             type: object
  *             required:
- *               - device_id
+ *               - board_id
+ *               - device_type
  *               - name
+ *               - gpio_pin
  *             properties:
- *               device_id:
+ *               board_id:
  *                 type: string
+ *               device_type:
+ *                 type: string
+ *                 enum: [switch, dimmer, sensor_dht22, sensor_ds18b20, sensor_analog]
  *               name:
  *                 type: string
- *               description:
- *                 type: string
- *               location:
- *                 type: string
- *               room:
- *                 type: string
+ *               gpio_pin:
+ *                 type: integer
+ *               config:
+ *                 type: object
  *     responses:
  *       201:
- *         description: Device registered successfully
- *       400:
- *         description: Validation error or device already exists
+ *         description: Device added successfully
  */
-router.post('/', deviceValidation, async (req, res) => {
+router.post('/', auth, async (req, res) => {
   try {
-    // Check validation errors
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({
-        success: false,
-        message: 'Validation failed',
-        errors: errors.array()
-      });
+    const { board_id, device_type, name, gpio_pin, config = {} } = req.body;
+
+    // Validate required fields
+    if (!board_id || !device_type || !name || gpio_pin === undefined) {
+      return res.status(400).json({ success: false, message: 'Missing required fields' });
     }
 
-    const { device_id, name, description, location, room } = req.body;
+    // Check if board exists and belongs to user
+    const [board] = await db.query(`
+      SELECT * FROM esp32_boards 
+      WHERE board_id = ? AND user_id = ?
+    `, [board_id, req.user.id]);
 
-    // Check if device already exists
-    const existingDevices = await db.query('SELECT id FROM devices WHERE device_id = ?', [device_id]);
-    if (existingDevices.length > 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Device with this ID already exists'
-      });
+    if (!board) {
+      return res.status(404).json({ success: false, message: 'Board not found' });
     }
 
-    // Create device
-    const result = await db.query(`
-      INSERT INTO devices (device_id, user_id, name, description, location, room, mqtt_topic_cmd, mqtt_topic_resp)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-    `, [
+    // Check if board is online
+    if (!board.is_online) {
+      return res.status(400).json({ success: false, message: 'Board is offline. Cannot add device.' });
+    }
+
+    // Check if GPIO pin is already in use
+    const [existingDevice] = await db.query(`
+      SELECT * FROM devices 
+      WHERE board_id = ? AND gpio_pin = ? AND is_enabled = 1
+    `, [board_id, gpio_pin]);
+
+    if (existingDevice) {
+      return res.status(409).json({ success: false, message: `GPIO pin ${gpio_pin} is already in use` });
+    }
+
+    // Generate unique device ID
+    const device_id = `${board_id}_GPIO${gpio_pin}`;
+
+    // Send add device command to ESP32
+    const addDeviceCommand = {
+      cmd: 'add_device',
+      data: {
       device_id,
-      req.user.id,
+        device_type,
       name,
-      description || null,
-      location || null,
-      room || null,
-      `cmd/${device_id}`,
-      `resp/${device_id}`
-    ]);
+        gpio_pin,
+        config
+      }
+    };
 
-    const deviceDbId = result.insertId;
+    const commandId = await mqttService.sendCommand(board_id, 'add_device', addDeviceCommand);
+    
+    // Wait for acknowledgment from ESP32
+    const ackReceived = await mqttService.waitForAck(commandId, 15000); // 15 second timeout
+    
+    if (!ackReceived) {
+      return res.status(408).json({ success: false, message: 'ESP32 did not acknowledge device addition. Device may not be added.' });
+    }
 
-    // Get created device
-    const devices = await db.query('SELECT * FROM devices WHERE id = ?', [deviceDbId]);
+    // Add device to database only after ESP32 confirms
+    const initialState = device_type === 'switch' ? { state: false } : {};
+    
+    await db.query(`
+      INSERT INTO devices (device_id, board_id, device_type, name, gpio_pin, config, state, is_enabled)
+      VALUES (?, ?, ?, ?, ?, ?, ?, 1)
+    `, [device_id, board_id, device_type, name, gpio_pin, JSON.stringify(config), JSON.stringify(initialState)]);
 
     res.status(201).json({
       success: true,
-      message: 'Device registered successfully',
-      data: {
-        device: devices[0]
-      }
+      message: 'Device added successfully',
+      data: { device_id, device_type, name, gpio_pin, config, state: initialState }
     });
 
   } catch (error) {
-    console.error('Register device error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error during device registration'
-    });
+    console.error('❌ Error adding device:', error);
+    res.status(500).json({ success: false, message: 'Failed to add device' });
   }
 });
 
 /**
  * @swagger
- * /api/devices/{id}:
+ * /api/devices/{deviceId}:
  *   put:
- *     summary: Update device
+ *     summary: Update device configuration
  *     tags: [Devices]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: id
+ *         name: deviceId
  *         required: true
  *         schema:
- *           type: integer
+ *           type: string
  *     requestBody:
  *       required: true
  *       content:
@@ -232,319 +330,334 @@ router.post('/', deviceValidation, async (req, res) => {
  *             properties:
  *               name:
  *                 type: string
- *               description:
- *                 type: string
- *               location:
- *                 type: string
- *               room:
- *                 type: string
+ *               config:
+ *                 type: object
  *     responses:
  *       200:
  *         description: Device updated successfully
- *       404:
- *         description: Device not found
  */
-router.put('/:deviceId', deviceOwnerMiddleware, async (req, res) => {
+router.put('/:deviceId', auth, async (req, res) => {
   try {
-    const { name, description, location, room } = req.body;
-    const updateFields = [];
-    const updateValues = [];
+    const { name, config } = req.body;
+    const { deviceId } = req.params;
 
-    if (name !== undefined) {
-      updateFields.push('name = ?');
-      updateValues.push(name);
-    }
-    if (description !== undefined) {
-      updateFields.push('description = ?');
-      updateValues.push(description);
-    }
-    if (location !== undefined) {
-      updateFields.push('location = ?');
-      updateValues.push(location);
-    }
-    if (room !== undefined) {
-      updateFields.push('room = ?');
-      updateValues.push(room);
+    // Check if device exists and user has access
+    const [device] = await db.query(`
+      SELECT d.*, b.user_id, b.is_online, b.board_id
+      FROM devices d
+      JOIN esp32_boards b ON d.board_id = b.board_id
+      WHERE d.device_id = ? AND b.user_id = ?
+    `, [deviceId, req.user.id]);
+
+    if (!device) {
+      return res.status(404).json({ success: false, message: 'Device not found' });
     }
 
-    if (updateFields.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'No fields to update'
-      });
+    // Check if board is online
+    if (!device.is_online) {
+      return res.status(400).json({ success: false, message: 'Board is offline. Cannot update device.' });
     }
 
-    updateValues.push(req.params.deviceId);
-
-    await db.query(
-      `UPDATE devices SET ${updateFields.join(', ')}, updated_at = NOW() WHERE id = ?`,
-      updateValues
-    );
-
-    // Get updated device
-    const devices = await db.query('SELECT * FROM devices WHERE id = ?', [req.params.deviceId]);
-
-    res.json({
-      success: true,
-      message: 'Device updated successfully',
+    // Send update command to ESP32
+    const updateCommand = {
+      cmd: 'update_device',
       data: {
-        device: devices[0]
+        device_id: deviceId,
+        name,
+        config
       }
-    });
+    };
+
+    const commandId = await mqttService.sendCommand(device.board_id, 'update_device', updateCommand);
+    
+    // Wait for acknowledgment
+    const ackReceived = await mqttService.waitForAck(commandId, 10000);
+    
+    if (!ackReceived) {
+      return res.status(408).json({ success: false, message: 'ESP32 did not acknowledge update. Changes may not be applied.' });
+    }
+
+    // Update device in database
+    await db.query(`
+      UPDATE devices 
+      SET name = ?, config = ?, updated_at = CURRENT_TIMESTAMP
+      WHERE device_id = ?
+    `, [name, JSON.stringify(config), deviceId]);
+
+    res.json({ success: true, message: 'Device updated successfully' });
 
   } catch (error) {
-    console.error('Update device error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
+    console.error('❌ Error updating device:', error);
+    res.status(500).json({ success: false, message: 'Failed to update device' });
   }
 });
 
 /**
  * @swagger
- * /api/devices/{id}:
+ * /api/devices/{deviceId}:
  *   delete:
- *     summary: Delete device
+ *     summary: Remove device from ESP32 board
  *     tags: [Devices]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: id
+ *         name: deviceId
  *         required: true
  *         schema:
- *           type: integer
+ *           type: string
  *     responses:
  *       200:
- *         description: Device deleted successfully
- *       404:
- *         description: Device not found
+ *         description: Device removed successfully
  */
-router.delete('/:deviceId', deviceOwnerMiddleware, async (req, res) => {
+router.delete('/:deviceId', auth, async (req, res) => {
   try {
-    // Only device owner can delete
-    if (req.device.user_id !== req.user.id) {
-      return res.status(403).json({
-        success: false,
-        message: 'Only device owner can delete the device'
-      });
+    const { deviceId } = req.params;
+
+    // Check if device exists and user has access
+    const [device] = await db.query(`
+      SELECT d.*, b.user_id, b.is_online, b.board_id
+      FROM devices d
+      JOIN esp32_boards b ON d.board_id = b.board_id
+      WHERE d.device_id = ? AND b.user_id = ?
+    `, [deviceId, req.user.id]);
+
+    if (!device) {
+      return res.status(404).json({ success: false, message: 'Device not found' });
     }
 
-    await db.query('DELETE FROM devices WHERE id = ?', [req.params.deviceId]);
+    // Check if board is online
+    if (!device.is_online) {
+      return res.status(400).json({ success: false, message: 'Board is offline. Cannot remove device.' });
+    }
 
-    res.json({
-      success: true,
-      message: 'Device deleted successfully'
-    });
+    // Send remove command to ESP32
+    const removeCommand = {
+      cmd: 'remove_device',
+      data: {
+        device_id: deviceId,
+        gpio_pin: device.gpio_pin
+      }
+    };
+
+    const commandId = await mqttService.sendCommand(device.board_id, 'remove_device', removeCommand);
+    
+    // Wait for acknowledgment
+    const ackReceived = await mqttService.waitForAck(commandId, 10000);
+    
+    if (!ackReceived) {
+      return res.status(408).json({ success: false, message: 'ESP32 did not acknowledge removal. Device may still be active on board.' });
+    }
+
+    // Mark device as disabled in database (soft delete)
+    await db.query(`
+      UPDATE devices 
+      SET is_enabled = 0, updated_at = CURRENT_TIMESTAMP
+      WHERE device_id = ?
+    `, [deviceId]);
+
+    res.json({ success: true, message: 'Device removed successfully' });
 
   } catch (error) {
-    console.error('Delete device error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
+    console.error('❌ Error removing device:', error);
+    res.status(500).json({ success: false, message: 'Failed to remove device' });
   }
 });
 
 /**
  * @swagger
- * /api/devices/{id}/command:
+ * /api/devices/{deviceId}/control:
  *   post:
- *     summary: Send command to device
+ *     summary: Control device (turn on/off, set value, etc.)
  *     tags: [Devices]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: id
+ *         name: deviceId
  *         required: true
  *         schema:
- *           type: integer
+ *           type: string
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - action
  *             properties:
  *               action:
  *                 type: string
- *               pin:
- *                 type: integer
- *               state:
- *                 type: string
+ *                 enum: [turn_on, turn_off, toggle, set_value, set_brightness]
  *               value:
  *                 type: number
+ *                 description: For dimmer or analog devices
  *     responses:
  *       200:
- *         description: Command sent successfully
- *       404:
- *         description: Device not found
+ *         description: Device controlled successfully
  */
-router.post('/:deviceId/command', deviceOwnerMiddleware, async (req, res) => {
+router.post('/:deviceId/control', auth, async (req, res) => {
   try {
-    const command = {
-      ...req.body,
-      userId: req.user.id,
-      timestamp: new Date().toISOString()
-    };
+    const { action, value, state } = req.body;
+    const { deviceId } = req.params;
 
-    const result = await mqttService.sendDeviceCommand(req.device.device_id, command);
+    // Check if device exists and user has access
+    const [device] = await db.query(`
+      SELECT d.*, b.user_id, b.is_online, b.board_id
+      FROM devices d
+      JOIN esp32_boards b ON d.board_id = b.board_id
+      WHERE d.device_id = ? AND b.user_id = ?
+    `, [deviceId, req.user.id]);
 
-    res.json({
-      success: true,
-      message: 'Command sent successfully',
-      data: result
-    });
+    if (!device) {
+      return res.status(404).json({ success: false, message: 'Device not found' });
+    }
+
+    // Check if board is online
+    if (!device.is_online) {
+      return res.status(400).json({ success: false, message: 'Board is offline. Cannot control device.' });
+    }
+
+    // Determine desired state/value
+    let desiredStateBool = undefined;
+    if (typeof state === 'boolean') {
+      desiredStateBool = state;
+    } else if (typeof action === 'string') {
+      const a = action.toLowerCase();
+      if (a === 'turn_on' || a === 'on') desiredStateBool = true;
+      else if (a === 'turn_off' || a === 'off') desiredStateBool = false;
+      else if (a === 'toggle') {
+        const current = device.state ? (typeof device.state === 'string' ? JSON.parse(device.state) : device.state) : { state: false };
+        desiredStateBool = !Boolean(current.state);
+      }
+    }
+
+    // Support PWM value for dimmer
+    if (device.device_type === 'dimmer') {
+      const pwmValue = Number(value);
+      if (Number.isFinite(pwmValue)) {
+        const commandId = await mqttService.sendCommand(device.board_id, 'pwm', { pin: device.gpio_pin, value: pwmValue });
+        const ackReceived = await mqttService.waitForAck(commandId, 10000);
+        if (!ackReceived) {
+          return res.status(408).json({ success: false, message: 'ESP32 did not acknowledge PWM command.' });
+        }
+        return res.json({ success: true, message: 'PWM command sent successfully' });
+      }
+    }
+
+    // Default: switch (on/off)
+    if (typeof desiredStateBool !== 'boolean') {
+      return res.status(400).json({ success: false, message: 'Invalid control parameters. Provide state boolean or action turn_on/turn_off/toggle.' });
+    }
+
+    const fwState = desiredStateBool ? 'on' : 'off';
+    const commandId = await mqttService.sendCommand(device.board_id, 'gpio', { pin: device.gpio_pin, state: fwState });
+
+    // Wait for acknowledgment
+    const ackReceived = await mqttService.waitForAck(commandId, 10000);
+    if (!ackReceived) {
+      return res.status(408).json({ success: false, message: 'ESP32 did not acknowledge control command.' });
+    }
+
+    // Optimistic update (actual state will also be updated on gpio_change)
+    await db.query(`
+      UPDATE devices SET state = JSON_SET(COALESCE(state, JSON_OBJECT()), '$.state', ?), updated_at = CURRENT_TIMESTAMP
+      WHERE device_id = ?
+    `, [desiredStateBool, deviceId]);
+
+    res.json({ success: true, message: 'Control command sent successfully', state: desiredStateBool });
 
   } catch (error) {
-    console.error('Send command error:', error);
-    res.status(500).json({
-      success: false,
-      message: error.message || 'Internal server error'
-    });
+    console.error('❌ Error controlling device:', error);
+    res.status(500).json({ success: false, message: 'Failed to control device' });
   }
 });
 
 /**
  * @swagger
- * /api/devices/{id}/status:
+ * /api/devices/{deviceId}/data:
  *   get:
- *     summary: Get device status and latest data
+ *     summary: Get device data history
  *     tags: [Devices]
  *     security:
  *       - bearerAuth: []
  *     parameters:
  *       - in: path
- *         name: id
+ *         name: deviceId
  *         required: true
  *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         schema:
  *           type: integer
+ *           default: 100
+ *       - in: query
+ *         name: data_type
+ *         schema:
+ *           type: string
+ *           enum: [state, sensor, heartbeat, error]
  *     responses:
  *       200:
- *         description: Device status retrieved successfully
+ *         description: Device data history
  */
-router.get('/:deviceId/status', deviceOwnerMiddleware, async (req, res) => {
+router.get('/:deviceId/data', auth, async (req, res) => {
   try {
-    // Get latest sensor data
-    const sensorData = await db.query(`
-      SELECT data_type, sensor_name, value, unit, timestamp
-      FROM device_data
-      WHERE device_id = ? AND data_type = 'sensor'
-      ORDER BY timestamp DESC
-      LIMIT 10
-    `, [req.params.deviceId]);
+    const { deviceId } = req.params;
+    const limit = parseInt(req.query.limit) || 100;
+    const dataType = req.query.data_type;
 
-    // Get recent commands
-    const recentCommands = await db.query(`
-      SELECT command, status, sent_at, acknowledged_at
-      FROM device_commands
+    // Check if device exists and user has access
+    const [device] = await db.query(`
+      SELECT d.*, b.user_id
+      FROM devices d
+      JOIN esp32_boards b ON d.board_id = b.board_id
+      WHERE d.device_id = ? AND b.user_id = ?
+    `, [deviceId, req.user.id]);
+
+    if (!device) {
+      return res.status(404).json({ success: false, message: 'Device not found' });
+    }
+
+    // Build query
+    let query = `
+      SELECT * FROM device_data 
       WHERE device_id = ?
-      ORDER BY created_at DESC
-      LIMIT 5
-    `, [req.params.deviceId]);
+    `;
+    const params = [deviceId];
 
-    res.json({
-      success: true,
-      data: {
-        device: req.device,
-        sensorData,
-        recentCommands
-      }
-    });
+    if (dataType) {
+      query += ` AND data_type = ?`;
+      params.push(dataType);
+    }
+
+    query += ` ORDER BY timestamp DESC LIMIT ?`;
+    params.push(limit);
+
+    const data = await db.query(query, params);
+
+    res.json({ success: true, data });
 
   } catch (error) {
-    console.error('Get device status error:', error);
-    res.status(500).json({
-      success: false,
-      message: 'Internal server error'
-    });
+    console.error('❌ Error fetching device data:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch device data' });
   }
 });
 
-/**
- * Link a device to current user by device_id or mac_address
- */
-router.post('/link', [
-  body('device_id').optional().isString(),
-  body('mac').optional().isString().isLength({ min: 12 }).withMessage('Invalid MAC'),
-  body('name').optional().isString(),
-  body('location').optional().isString()
-], async (req, res) => {
+// Legacy route for device linking (still needed for ESP32 registration)
+router.post('/link', auth, async (req, res) => {
   try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
+    const { shortId, deviceName, deviceLocation } = req.body;
+
+    if (!shortId) {
+      return res.status(400).json({ success: false, message: 'Short ID is required' });
     }
 
-    const { device_id, mac, name, location } = req.body;
+    // This will be handled by MQTT registration flow
+    res.json({ success: true, message: 'Use ESP32 configuration portal to link device' });
 
-    if (!device_id && !mac) {
-      return res.status(400).json({ success: false, message: 'device_id or mac is required' });
-    }
-
-    // Find existing device by device_id or mac
-    let devices = [];
-    if (device_id) {
-      devices = await db.query('SELECT * FROM devices WHERE device_id = ?', [device_id]);
-    } else if (mac) {
-      devices = await db.query('SELECT * FROM devices WHERE mac_address = ?', [mac]);
-    }
-
-    if (devices.length === 0 && !device_id) {
-      return res.status(404).json({ success: false, message: 'Device not found for provided MAC, please provide device_id' });
-    }
-
-    if (devices.length === 0 && device_id) {
-      // Create new record linked to this user
-      await db.query(`
-        INSERT INTO devices (device_id, user_id, name, location, mac_address, mqtt_topic_cmd, mqtt_topic_resp)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-      `, [
-        device_id,
-        req.user.id,
-        name || `Device ${device_id}`,
-        location || null,
-        mac || null,
-        `cmd/${device_id}`,
-        `resp/${device_id}`
-      ]);
-
-      devices = await db.query('SELECT * FROM devices WHERE device_id = ?', [device_id]);
-    } else if (devices.length > 0) {
-      // Update ownership and optional fields if unowned or owned by same user
-      const device = devices[0];
-      if (device.user_id !== req.user.id) {
-        // Allow relink only if not owned (or implement transfer policy as needed)
-        // Here: if owned by someone else, forbid
-        return res.status(403).json({ success: false, message: 'Device is owned by another user' });
-      }
-
-      const fields = [];
-      const values = [];
-      if (name) { fields.push('name = ?'); values.push(name); }
-      if (location) { fields.push('location = ?'); values.push(location); }
-      if (mac && !device.mac_address) { fields.push('mac_address = ?'); values.push(mac); }
-      if (fields.length > 0) {
-        values.push(device.id);
-        await db.query(`UPDATE devices SET ${fields.join(', ')}, updated_at = NOW() WHERE id = ?`, values);
-      }
-    }
-
-    const deviceRecord = device_id
-      ? (await db.query('SELECT * FROM devices WHERE device_id = ?', [device_id]))[0]
-      : (await db.query('SELECT * FROM devices WHERE mac_address = ?', [mac]))[0];
-
-    // Ensure backend subscribes to this device's resp topic
-    await mqttService.subscribeToNewDevice(deviceRecord.device_id, `resp/${deviceRecord.device_id}`);
-
-    return res.status(200).json({ success: true, message: 'Device linked successfully', data: { device: deviceRecord } });
   } catch (error) {
-    console.error('Link device error:', error);
-    return res.status(500).json({ success: false, message: 'Internal server error' });
+    console.error('❌ Error in device linking:', error);
+    res.status(500).json({ success: false, message: 'Failed to link device' });
   }
 });
 

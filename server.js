@@ -4,13 +4,10 @@ const helmet = require('helmet');
 const compression = require('compression');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
-const { createServer } = require('http');
-const { Server } = require('socket.io');
 require('dotenv').config();
 
 const db = require('./config/database');
 const mqttService = require('./services/mqttService');
-const socketService = require('./services/socketService');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -25,13 +22,7 @@ const errorHandler = require('./middleware/errorHandler');
 const { authMiddleware } = require('./middleware/auth');
 
 const app = express();
-const server = createServer(app);
-const io = new Server(server, {
-  cors: {
-    origin: process.env.CORS_ORIGIN || "http://localhost:3001",
-    methods: ["GET", "POST"]
-  }
-});
+let serverRef = null;
 
 const PORT = process.env.PORT || 3000;
 
@@ -47,8 +38,8 @@ app.use(cors({
 
 // Rate limiting
 const limiter = rateLimit({
-  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000, // 15 minutes
-  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100, // limit each IP to 100 requests per windowMs
+  windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS) || 15 * 60 * 1000,
+  max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS) || 100,
   message: 'Too many requests from this IP, please try again later.'
 });
 app.use('/api/', limiter);
@@ -112,12 +103,8 @@ async function initializeServices() {
     await mqttService.initialize();
     console.log('✅ MQTT service initialized');
 
-    // Initialize Socket.IO service
-    socketService.initialize(io);
-    console.log('✅ Socket.IO service initialized');
-
     // Start server
-    server.listen(PORT, () => {
+    serverRef = app.listen(PORT, () => {
       console.log(`🚀 IoT Platform Backend running on port ${PORT}`);
       console.log(`📚 API Documentation: http://localhost:${PORT}/api-docs`);
       console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
@@ -132,16 +119,12 @@ async function initializeServices() {
 // Graceful shutdown
 process.on('SIGTERM', async () => {
   console.log('SIGTERM received, shutting down gracefully');
-  server.close(() => {
-    console.log('Process terminated');
-  });
+  if (serverRef) serverRef.close(() => { console.log('Process terminated'); });
 });
 
 process.on('SIGINT', async () => {
   console.log('SIGINT received, shutting down gracefully');
-  server.close(() => {
-    console.log('Process terminated');
-  });
+  if (serverRef) serverRef.close(() => { console.log('Process terminated'); });
 });
 
 // Start the application
@@ -149,4 +132,4 @@ if (require.main === module) {
   initializeServices();
 }
 
-module.exports = { app, server, io };
+module.exports = { app };

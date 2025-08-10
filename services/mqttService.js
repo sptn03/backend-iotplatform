@@ -78,18 +78,14 @@ class MQTTService {
 
   async subscribeToDeviceTopics() {
     try {
-      // Subscribe to all device response topics
-      const devices = await db.query('SELECT device_id, mqtt_topic_resp FROM devices WHERE mqtt_topic_resp IS NOT NULL');
-      
-      for (const device of devices) {
-        if (device.mqtt_topic_resp) {
-          this.subscribe(device.mqtt_topic_resp, (topic, message) => {
-            this.handleDeviceResponse(device.device_id, topic, message);
-          });
-        }
-      }
+      // Subscribe to all device response topics using wildcard
+      this.subscribe('resp/+', (topic, message) => {
+        // Extract deviceId from topic: resp/ESP32_XXX -> ESP32_XXX
+        const deviceId = topic.split('/')[1];
+        this.handleDeviceResponse(deviceId, topic, message);
+      });
 
-      console.log(`✅ Subscribed to ${devices.length} device response topics`);
+      console.log(`✅ Subscribed to wildcard topic: resp/+`);
     } catch (error) {
       console.error('❌ Failed to subscribe to device topics:', error);
     }
@@ -200,10 +196,19 @@ class MQTTService {
       const messageStr = message.toString();
       console.log(`📨 MQTT message received on ${topic}:`, messageStr);
 
-      // Check for specific topic handlers
-      const handler = this.messageHandlers.get(topic);
-      if (handler) {
-        handler(topic, messageStr);
+      // Try exact topic handler first
+      const exactHandler = this.messageHandlers.get(topic);
+      if (exactHandler) {
+        exactHandler(topic, messageStr);
+        return;
+      }
+
+      // Try wildcard handlers (supports MQTT '+' and '#')
+      for (const [pattern, handler] of this.messageHandlers.entries()) {
+        if (this.matchesMqttTopic(pattern, topic)) {
+          handler(topic, messageStr);
+          return;
+        }
       }
 
     } catch (error) {
@@ -211,39 +216,301 @@ class MQTTService {
     }
   }
 
+  matchesMqttTopic(pattern, topic) {
+    if (!pattern) return false;
+    if (pattern === topic) return true;
+
+    const patternLevels = pattern.split('/');
+    const topicLevels = topic.split('/');
+
+    for (let i = 0, j = 0; i < patternLevels.length; i++, j++) {
+      const p = patternLevels[i];
+      const t = topicLevels[j];
+
+      if (p === '#') {
+        return true; // matches remaining levels
+      }
+
+      if (t === undefined) {
+        return false; // topic ended but pattern has more (and no '#')
+      }
+
+      if (p === '+') {
+        continue; // matches exactly one level
+      }
+
+      if (p !== t) {
+        return false;
+      }
+    }
+
+    // Match only if both consumed (or pattern ended with '#')
+    return topicLevels.length === patternLevels.length || patternLevels[patternLevels.length - 1] === '#';
+  }
+
+  // Command tracking for acknowledgments
+  pendingCommands = new Map();
+  commandCounter = 0;
+
+  async sendCommand(boardId, commandType, commandData) {
+    try {
+      const commandId = `cmd_${++this.commandCounter}_${Date.now()}`;
+      const topic = `cmd/${boardId}`;
+      
+      const message = {
+        id: commandId,
+        type: commandType,
+        data: commandData,
+        timestamp: new Date().toISOString()
+      };
+ 
+      // Build firmware payload for known command types (simple JSON commands expect 'action')
+      let publishPayload = message; // default envelope
+      let expectedAction = undefined;
+      let expectedPin = undefined;
+      if (commandType === 'add_device') {
+        const devType = commandData?.data?.device_type;
+        const pin = commandData?.data?.gpio_pin;
+        const name = commandData?.data?.name;
+        expectedPin = pin;
+        if (devType === 'switch' || devType === 'dimmer') {
+          expectedAction = 'gpio_config';
+          publishPayload = {
+            id: commandId,
+            action: 'gpio_config',
+            cmd: 'add',
+            pin,
+            type: devType === 'switch' ? 'output' : 'pwm',
+            name
+          };
+        } else if (devType === 'sensor_dht22' || devType === 'sensor_ds18b20' || devType === 'sensor_analog') {
+          expectedAction = 'sensor_config';
+          publishPayload = {
+            id: commandId,
+            action: 'sensor_config',
+            cmd: 'add',
+            pin,
+            type: devType === 'sensor_dht22' ? 'dht22' : (devType === 'sensor_ds18b20' ? 'ds18b20' : 'analog'),
+            name
+          };
+        }
+      } else if (commandType === 'gpio') {
+        expectedAction = 'gpio';
+        expectedPin = Number(commandData?.pin);
+        publishPayload = {
+          id: commandId,
+          action: 'gpio',
+          ...commandData
+        };
+      }
+ 
+      // Store command for tracking
+      this.pendingCommands.set(commandId, {
+        boardId,
+        commandType,
+        status: 'pending',
+        sentAt: new Date(),
+        resolve: null,
+        reject: null,
+        expectedAction,
+        expectedPin
+      });
+ 
+      // Record command in database only when the device already exists and it's not an add_device command
+      const deviceIdForRow = commandData?.data?.device_id || null;
+      if (deviceIdForRow && commandType !== 'add_device') {
+        await db.query(`
+          INSERT INTO device_commands (device_id, command_type, command_data, status, sent_at)
+          VALUES (?, ?, ?, 'sent', CURRENT_TIMESTAMP)
+        `, [deviceIdForRow, commandType, JSON.stringify(message)]);
+      }
+ 
+      // Publish command
+      this.publish(topic, JSON.stringify(publishPayload), { qos: 2 }); // QoS 2 for important commands
+       
+      console.log(`📤 Sent command ${commandId} to board ${boardId}:`, commandType);
+       
+      return commandId;
+    } catch (error) {
+      console.error('❌ Failed to send command:', error);
+      throw error;
+    }
+  }
+
+  async waitForAck(commandId, timeoutMs = 10000) {
+    return new Promise((resolve, reject) => {
+      const command = this.pendingCommands.get(commandId);
+      if (!command) {
+        resolve(false);
+        return;
+      }
+
+      // Set up promise resolvers
+      command.resolve = resolve;
+      command.reject = reject;
+
+      // Set timeout
+      setTimeout(() => {
+        const cmd = this.pendingCommands.get(commandId);
+        if (cmd && cmd.status === 'pending') {
+          this.pendingCommands.delete(commandId);
+          console.log(`⏰ Command ${commandId} timed out`);
+          resolve(false);
+        }
+      }, timeoutMs);
+    });
+  }
+
   async handleDeviceResponse(deviceId, topic, message) {
     try {
-      const messageStr = message.toString();
+      const payload = typeof message === 'string' ? message : message.toString();
       let data;
-
+      
       try {
-        data = JSON.parse(messageStr);
-      } catch (parseError) {
-        console.warn('⚠️ Non-JSON message received:', messageStr);
-        data = { raw_message: messageStr };
+        data = JSON.parse(payload);
+      } catch (e) {
+        console.error('❌ Invalid JSON in device response:', payload);
+        return;
       }
 
-      // Auto-register device if it has user ID but not in database
-      if (data.userId && data.userEmail) {
-        await this.autoRegisterDevice(deviceId, data);
+      console.log(`📥 Device response from ${deviceId}:`, data);
+
+      // Handle command acknowledgments
+      if (data.type === 'ack' && data.commandId) {
+        const command = this.pendingCommands.get(data.commandId);
+        if (command) {
+          command.status = data.success ? 'acknowledged' : 'failed';
+          command.acknowledgedAt = new Date();
+          
+          // Update database
+          await db.query(`
+            UPDATE device_commands 
+            SET status = ?, acknowledged_at = CURRENT_TIMESTAMP, error_message = ?
+            WHERE JSON_UNQUOTE(JSON_EXTRACT(command_data, '$.id')) = ?
+          `, [command.status, data.error || null, data.commandId]);
+
+          // Resolve promise
+          if (command.resolve) {
+            command.resolve(data.success);
+          }
+          
+          this.pendingCommands.delete(data.commandId);
+          console.log(`✅ Command ${data.commandId} acknowledged:`, data.success ? 'SUCCESS' : 'FAILED');
+        }
+        return;
       }
 
-      // Update device last seen
-      await db.query(
-        'UPDATE devices SET last_seen = NOW(), is_online = true WHERE device_id = ?',
-        [deviceId]
-      );
+      // Handle firmware simple response style (status/action)
+      if (data.status && data.action) {
+        for (const [pendingId, pending] of this.pendingCommands.entries()) {
+          if (pending.boardId === deviceId) {
+            const actionMatches = !pending.expectedAction || pending.expectedAction === data.action;
+            const pinMatches = !pending.expectedPin || (data.details && Number(data.details.pin) === Number(pending.expectedPin));
+            if (actionMatches && pinMatches) {
+              pending.status = data.status === 'success' ? 'acknowledged' : 'failed';
+              pending.acknowledgedAt = new Date();
+              if (pending.resolve) {
+                pending.resolve(data.status === 'success');
+              }
+              this.pendingCommands.delete(pendingId);
+              console.log(`✅ Command ${pendingId} resolved by firmware response (${data.action}):`, data.status);
+              break;
+            }
+          }
+        }
+        // continue handling other types after
+      }
 
-      // Handle different types of responses
-      if (data.type === 'heartbeat' || data.action === 'ping') {
-        await this.handleHeartbeat(deviceId, data);
-      } else if (data.type === 'sensor_data') {
-        await this.handleSensorData(deviceId, data);
-      } else if (data.type === 'command_response') {
-        await this.handleCommandResponse(deviceId, data);
-      } else {
-        // Store as general device data
-        await this.storeDeviceData(deviceId, 'general', data);
+      // Handle GPIO change events (map to device state updates)
+      if (data.type === 'gpio_change' && data.details && typeof data.details.pin !== 'undefined') {
+        const pin = Number(data.details.pin);
+        const isOn = String(data.details.state).toUpperCase() === 'HIGH';
+        const derivedDeviceId = `${deviceId}_GPIO${pin}`;
+
+        // Update device state
+        await this.updateDeviceState(derivedDeviceId, { state: isOn });
+
+        // Store state change if device exists
+        const existingDevices = await db.query('SELECT device_id FROM devices WHERE device_id = ? LIMIT 1', [derivedDeviceId]);
+        if (existingDevices.length > 0) {
+          await db.query(`
+            INSERT INTO device_data (device_id, data_type, value, timestamp)
+            VALUES (?, 'state', ?, CURRENT_TIMESTAMP)
+          `, [derivedDeviceId, JSON.stringify({ pin, state: isOn, reason: data.details.reason || null })]);
+        }
+
+        // Broadcast via socket if available
+        const socketService = require('./socketService');
+        if (socketService) {
+          socketService.broadcastDeviceUpdate(derivedDeviceId, { state: isOn });
+        }
+        return;
+      }
+
+      // Handle heartbeat/status updates
+      if (data.type === 'heartbeat' || data.type === 'status') {
+        await this.updateBoardStatus(deviceId, data);
+        
+        // Store heartbeat data only if a matching device exists to satisfy FK
+        const existingDevices = await db.query(
+          'SELECT device_id FROM devices WHERE device_id = ? LIMIT 1',
+          [deviceId]
+        );
+        if (existingDevices.length > 0) {
+          await db.query(`
+            INSERT INTO device_data (device_id, data_type, value, timestamp)
+            VALUES (?, 'heartbeat', ?, CURRENT_TIMESTAMP)
+          `, [deviceId, JSON.stringify(data)]);
+        }
+        return;
+      }
+
+      // Handle sensor data
+      if (data.type === 'sensor') {
+        await db.query(`
+          INSERT INTO device_data (device_id, data_type, value, timestamp)
+          VALUES (?, 'sensor', ?, CURRENT_TIMESTAMP)
+        `, [data.deviceId || deviceId, JSON.stringify(data.data)]);
+        
+        // Emit via Socket.IO if available
+        if (this.socketService) {
+          this.socketService.emitToDevice(data.deviceId || deviceId, 'sensor_data', data.data);
+        }
+        return;
+      }
+
+      // Handle device state changes
+      if (data.type === 'state') {
+        await this.updateDeviceState(data.deviceId || deviceId, data.state);
+        
+        // Store state change
+        await db.query(`
+          INSERT INTO device_data (device_id, data_type, value, timestamp)
+          VALUES (?, 'state', ?, CURRENT_TIMESTAMP)
+        `, [data.deviceId || deviceId, JSON.stringify(data.state)]);
+        
+        // Emit via Socket.IO if available
+        if (this.socketService) {
+          this.socketService.emitToDevice(data.deviceId || deviceId, 'state_change', data.state);
+        }
+        return;
+      }
+
+      // Handle device configuration sync
+      if (data.type === 'device_sync') {
+        await this.syncDeviceConfiguration(deviceId, data.devices);
+        return;
+      }
+
+      // Handle errors
+      if (data.type === 'error') {
+        console.error(`❌ Device ${deviceId} reported error:`, data.error);
+        
+        await db.query(`
+          INSERT INTO device_data (device_id, data_type, value, timestamp)
+          VALUES (?, 'error', ?, CURRENT_TIMESTAMP)
+        `, [deviceId, JSON.stringify(data)]);
+        return;
       }
 
     } catch (error) {
@@ -253,12 +520,6 @@ class MQTTService {
 
   async autoRegisterDevice(deviceId, data) {
     try {
-      // Check if device already exists
-      const existingDevices = await db.query('SELECT id FROM devices WHERE device_id = ?', [deviceId]);
-      if (existingDevices.length > 0) {
-        return; // Device already registered
-      }
-
       // Resolve user by shortId (preferred), else email, else numeric id
       let users = [];
       if (data.shortId) {
@@ -272,37 +533,51 @@ class MQTTService {
       }
 
       if (users.length === 0) {
-        console.log(`⚠️ User not found for device ${deviceId}, shortId: ${data.shortId}, email: ${data.userEmail}, userId: ${data.userId}`);
-        return;
+        console.log(`⚠️ User not found for board ${deviceId}, shortId: ${data.shortId}, email: ${data.userEmail}, userId: ${data.userId}`);
+        return false;
       }
 
       const userId = users[0].id;
-      const deviceName = data.deviceName || `Device ${deviceId}`;
-      const deviceLocation = data.deviceLocation || '';
+      const boardId = deviceId; // Align naming
       const mac = data.details?.mac || data.mac || null;
+      const name = data.deviceName || `ESP32 ${boardId}`;
+      const location = data.deviceLocation || '';
+      const topicCmd = `cmd/${boardId}`;
+      const topicResp = `resp/${boardId}`;
 
-      // Auto-register device with topics
-      await db.query(`
-        INSERT INTO devices (device_id, user_id, name, description, location, mac_address, mqtt_topic_cmd, mqtt_topic_resp)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-      `, [
-        deviceId,
-        userId,
-        deviceName,
-        `Auto-registered device from MQTT`,
-        deviceLocation,
-        mac,
-        `cmd/${deviceId}`,
-        `resp/${deviceId}`
-      ]);
+      // Check if board exists
+      const [existingBoard] = await db.query('SELECT * FROM esp32_boards WHERE board_id = ?', [boardId]);
 
-      console.log(`✅ Auto-registered device ${deviceId} for user ${userId} ${mac ? `(MAC: ${mac})` : ''}`);
+      if (!existingBoard) {
+        // Create new board record
+        await db.query(
+          `INSERT INTO esp32_boards (board_id, mac_address, user_id, name, location, mqtt_topic_cmd, mqtt_topic_resp, is_online)
+           VALUES (?, ?, ?, ?, ?, ?, ?, 0)`,
+          [boardId, mac, userId, name, location, topicCmd, topicResp]
+        );
+        console.log(`✅ Registered new board ${boardId} for user ${userId}${mac ? ` (MAC: ${mac})` : ''}`);
+      } else {
+        // Update ownership/topics/mac if needed
+        const updatedUserId = existingBoard.user_id || userId;
+        await db.query(
+          `UPDATE esp32_boards 
+           SET user_id = ?, 
+               mac_address = COALESCE(?, mac_address),
+               name = COALESCE(?, name),
+               location = COALESCE(?, location),
+               mqtt_topic_cmd = COALESCE(mqtt_topic_cmd, ?),
+               mqtt_topic_resp = COALESCE(mqtt_topic_resp, ?),
+               updated_at = CURRENT_TIMESTAMP
+           WHERE board_id = ?`,
+          [updatedUserId, mac, name, location, topicCmd, topicResp, boardId]
+        );
+        console.log(`✅ Updated board ${boardId} for user ${updatedUserId}${mac ? ` (MAC: ${mac})` : ''}`);
+      }
 
-      // Subscribe to this new device
-      await this.subscribeToNewDevice(deviceId, `resp/${deviceId}`);
-
+      return true;
     } catch (error) {
-      console.error('❌ Error auto-registering device:', error);
+      console.error('❌ Error auto-registering board:', error);
+      return false;
     }
   }
 
@@ -406,14 +681,70 @@ class MQTTService {
     }
   }
 
-  async subscribeToNewDevice(deviceId, responseTopic) {
-    this.subscribe(responseTopic, (topic, message) => {
-      this.handleDeviceResponse(deviceId, topic, message);
-    });
+  async updateBoardStatus(boardId, data) {
+    try {
+      const version = (data.details && data.details.version) || data.version || data.firmware_version || null;
+      const mac = (data.details && data.details.mac) || data.mac || null;
+
+      await db.query(`
+        UPDATE esp32_boards 
+        SET is_online = 1, 
+            last_seen = CURRENT_TIMESTAMP, 
+            firmware_version = COALESCE(?, firmware_version),
+            mac_address = COALESCE(?, mac_address)
+        WHERE board_id = ?
+      `, [version, mac, boardId]);
+      
+      console.log(`💚 Board ${boardId} is online (fw: ${version || 'n/a'})`);
+    } catch (error) {
+      console.error('❌ Error updating board status:', error);
+    }
   }
 
-  async unsubscribeFromDevice(responseTopic) {
-    this.unsubscribe(responseTopic);
+  async updateDeviceState(deviceId, state) {
+    try {
+      await db.query(`
+        UPDATE devices 
+        SET state = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE device_id = ?
+      `, [JSON.stringify(state), deviceId]);
+      
+      console.log(`🔄 Device ${deviceId} state updated:`, state);
+    } catch (error) {
+      console.error('❌ Error updating device state:', error);
+    }
+  }
+
+  async syncDeviceConfiguration(boardId, devicesList) {
+    try {
+      console.log(`🔄 Syncing device configuration for board ${boardId}:`, devicesList);
+      
+      // Get current devices from database
+      const dbDevices = await db.query(`
+        SELECT device_id, gpio_pin, device_type, name, config 
+        FROM devices 
+        WHERE board_id = ? AND is_enabled = 1
+      `, [boardId]);
+
+      // Update ESP32 with database configuration
+      const syncCommand = {
+        cmd: 'sync_devices',
+        data: {
+          devices: dbDevices.map(d => ({
+            device_id: d.device_id,
+            gpio_pin: d.gpio_pin,
+            device_type: d.device_type,
+            name: d.name,
+            config: typeof d.config === 'string' ? JSON.parse(d.config) : d.config
+          }))
+        }
+      };
+
+      await this.sendCommand(boardId, 'sync_devices', syncCommand);
+      
+    } catch (error) {
+      console.error('❌ Error syncing device configuration:', error);
+    }
   }
 
   async handleRegistration(topic, message) {
@@ -433,22 +764,27 @@ class MQTTService {
         return;
       }
 
-      // Link device to user via shortId and create topics if needed
-      await this.autoRegisterDevice(deviceId, data);
+      // Link board to user via shortId and create topics if needed
+      const ok = await this.autoRegisterDevice(deviceId, data);
 
-      // Ensure we subscribe to its response topic
-      await this.subscribeToNewDevice(deviceId, `resp/${deviceId}`);
-
-      // Acknowledge to device so it can exit AP mode
+      // Build ack based on result
       const ack = {
         action: 'registered',
-        status: 'success',
+        status: ok ? 'success' : 'failed',
         user_short_id: data.shortId,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       };
-      await this.publish(`cmd/${deviceId}`, ack);
+      if (!ok) {
+        ack.error = 'link_failed';
+      }
 
-      console.log(`✅ Registration ack sent to cmd/${deviceId}`);
+      const replyTopic = data.replyTopic && typeof data.replyTopic === 'string' && data.replyTopic.length > 0
+        ? data.replyTopic
+        : `cmd/${deviceId}`;
+
+      await this.publish(replyTopic, ack);
+
+      console.log(`✅ Registration ack sent to ${replyTopic} (${ack.status})`);
     } catch (error) {
       console.error('❌ Error handling registration:', error);
     }
