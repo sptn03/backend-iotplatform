@@ -10,7 +10,7 @@ const router = express.Router();
 
 /**
  * @swagger
- * /api/boards:
+ * /api/devices/boards:
  *   get:
  *     summary: Get all ESP32 boards for user
  *     tags: [ESP32 Boards]
@@ -24,7 +24,7 @@ router.get('/boards', auth, DeviceController.getBoards);
 
 /**
  * @swagger
- * /api/boards/{boardId}:
+ * /api/devices/boards/{boardId}:
  *   get:
  *     summary: Get ESP32 board details with devices
  *     tags: [ESP32 Boards]
@@ -44,7 +44,7 @@ router.get('/boards/:boardId', auth, DeviceController.getBoardDetails);
 
 /**
  * @swagger
- * /api/boards/{boardId}:
+ * /api/devices/boards/{boardId}:
  *   put:
  *     summary: Update ESP32 board
  *     tags: [ESP32 Boards]
