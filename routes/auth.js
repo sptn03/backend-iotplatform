@@ -22,7 +22,8 @@ const registerValidation = [
 
 const loginValidation = [
   body('email').isEmail().normalizeEmail().withMessage('Please provide a valid email'),
-  body('password').notEmpty().withMessage('Password is required')
+  body('password').notEmpty().withMessage('Password is required'),
+  body('app_role').optional().isString().isLength({ max: 50 })
 ];
 
 /**
@@ -55,6 +56,9 @@ const loginValidation = [
  *                 type: string
  *               phone:
  *                 type: string
+ *               app_role:
+ *                 type: string
+ *                 description: Optional app context (e.g., web, mobile). Defaults to 'web'.
  *     responses:
  *       201:
  *         description: User registered successfully
@@ -84,6 +88,9 @@ router.post('/register', authLimiter, registerValidation, AuthController.registe
  *                 format: email
  *               password:
  *                 type: string
+ *               app_role:
+ *                 type: string
+ *                 description: Optional app context (e.g., web, mobile). Defaults to 'web'.
  *     responses:
  *       200:
  *         description: Login successful
@@ -116,6 +123,16 @@ router.get('/me', authMiddleware, AuthController.me);
  *     tags: [Authentication]
  *     security:
  *       - bearerAuth: []
+ *     requestBody:
+ *       required: false
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               app_role:
+ *                 type: string
+ *                 description: Optional app context (e.g., web, mobile). Defaults to 'web'.
  *     responses:
  *       200:
  *         description: Token refreshed successfully
@@ -128,12 +145,16 @@ router.post('/refresh', authMiddleware, AuthController.refresh);
  * @swagger
  * /api/auth/logout:
  *   post:
- *     summary: Logout user (client-side token removal)
+ *     summary: Logout user and revoke current token
  *     tags: [Authentication]
+ *     security:
+ *       - bearerAuth: []
  *     responses:
  *       200:
  *         description: Logout successful
+ *       401:
+ *         description: Unauthorized
  */
-router.post('/logout', AuthController.logout);
+router.post('/logout', authMiddleware, AuthController.logout);
 
 module.exports = router;

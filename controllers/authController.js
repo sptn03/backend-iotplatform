@@ -2,6 +2,13 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { validationResult } = require('express-validator');
 const UserModel = require('../models/userModel');
+const TokenModel = require('../models/tokenModel');
+
+function getExpiresAtFromJwt(token) {
+  const decoded = jwt.decode(token);
+  if (!decoded || !decoded.exp) return null;
+  return new Date(decoded.exp * 1000);
+}
 
 function generateShortId() {
   const prefix = 'NZ03';
@@ -14,12 +21,24 @@ function generateShortId() {
 }
 
 const generateToken = (userId) => {
+  const expiresIn = process.env.JWT_EXPIRES_IN;
+  if (expiresIn && expiresIn.trim() !== '') {
+    return jwt.sign(
+      { userId },
+      process.env.JWT_SECRET,
+      { expiresIn }
+    );
+  }
+  // No expiry configured -> issue token without exp claim
   return jwt.sign(
     { userId },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
+    process.env.JWT_SECRET
   );
 };
+
+function getAppRole(req) {
+  return (req.body && req.body.app_role) || req.get('X-App-Role') || 'web';
+}
 
 const AuthController = {
   async register(req, res) {
@@ -53,6 +72,16 @@ const AuthController = {
       const userId = result.insertId;
 
       const token = generateToken(userId);
+      const expiresAt = getExpiresAtFromJwt(token); // may be null
+      const appRole = getAppRole(req);
+      await TokenModel.createTokenRecord({
+        userId,
+        token,
+        appRole,
+        expiresAt,
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip
+      });
       const users = await UserModel.findPublicById(userId);
 
       res.status(201).json({ success: true, message: 'User registered successfully', data: { user: users[0], token } });
@@ -88,6 +117,22 @@ const AuthController = {
 
       await UserModel.updateLastLogin(user.id);
       const token = generateToken(user.id);
+      const expiresAt = getExpiresAtFromJwt(token); // may be null
+      const appRole = getAppRole(req);
+
+      // Enforce single active per app_role for role 'user'
+      if (user.role !== 'admin') {
+        await TokenModel.revokeActiveTokensByAppRole(user.id, appRole);
+      }
+
+      await TokenModel.createTokenRecord({
+        userId: user.id,
+        token,
+        appRole,
+        expiresAt,
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip
+      });
       delete user.password;
 
       res.json({ success: true, message: 'Login successful', data: { user, token } });
@@ -113,6 +158,22 @@ const AuthController = {
   async refresh(req, res) {
     try {
       const token = generateToken(req.user.id);
+      const expiresAt = getExpiresAtFromJwt(token); // may be null
+      const appRole = getAppRole(req);
+
+      // Enforce single active per app_role for role 'user'
+      if (req.user.role !== 'admin') {
+        await TokenModel.revokeActiveTokensByAppRole(req.user.id, appRole);
+      }
+
+      await TokenModel.createTokenRecord({
+        userId: req.user.id,
+        token,
+        appRole,
+        expiresAt,
+        userAgent: req.get('User-Agent'),
+        ipAddress: req.ip
+      });
       res.json({ success: true, message: 'Token refreshed successfully', data: { token } });
     } catch (error) {
       console.error('Token refresh error:', error);
@@ -121,7 +182,16 @@ const AuthController = {
   },
 
   async logout(req, res) {
-    res.json({ success: true, message: 'Logout successful. Please remove the token from client storage.' });
+    try {
+      if (!req.user || !req.token) {
+        return res.status(401).json({ success: false, message: 'Not authenticated' });
+      }
+      await TokenModel.revokeToken({ userId: req.user.id, token: req.token });
+      res.json({ success: true, message: 'Logout successful' });
+    } catch (error) {
+      console.error('Logout error:', error);
+      res.status(500).json({ success: false, message: 'Internal server error during logout' });
+    }
   }
 };
 

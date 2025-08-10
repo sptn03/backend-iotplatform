@@ -679,15 +679,20 @@ class MQTTService {
     try {
       const version = (data.details && data.details.version) || data.version || data.firmware_version || null;
       const mac = (data.details && data.details.mac) || data.mac || null;
+      const ip = (data.details && data.details.ip) || data.ip || null;
+      const status = (data.status || '').toString().toLowerCase();
+      const isOnline = status === 'offline' ? 0 : 1;
 
       await db.query(`
         UPDATE esp32_boards 
-        SET is_online = 1, 
+        SET is_online = ?, 
             last_seen = CURRENT_TIMESTAMP, 
             firmware_version = COALESCE(?, firmware_version),
             mac_address = COALESCE(?, mac_address)
         WHERE board_id = ?
-      `, [version, mac, boardId]);
+      `, [isOnline, version, mac, boardId]);
+
+      // Optionally update derived devices' online state in future
       
     } catch (error) {
       console.error('❌ Error updating board status:', error);

@@ -46,6 +46,51 @@ async function createDatabase() {
     `);
     console.log('✅ Users table created');
 
+    // Ensure role column exists
+    await connection.execute(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS role ENUM('admin','user') NOT NULL DEFAULT 'user'
+    `);
+    console.log('✅ Ensured users.role column exists');
+
+    // Create user_tokens table
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS user_tokens (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        token VARCHAR(1024) NOT NULL,
+        app_role VARCHAR(50) NULL,
+        revoked BOOLEAN DEFAULT FALSE,
+        user_agent VARCHAR(255),
+        ip_address VARCHAR(45),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        revoked_at TIMESTAMP NULL,
+        expires_at DATETIME NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_user_id (user_id),
+        INDEX idx_token (token(255)),
+        INDEX idx_revoked (revoked),
+        INDEX idx_expires_at (expires_at),
+        INDEX idx_app_role (app_role)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    console.log('✅ user_tokens table created');
+
+    // Ensure app_role column exists on user_tokens
+    await connection.execute(`
+      ALTER TABLE user_tokens
+      ADD COLUMN IF NOT EXISTS app_role VARCHAR(50) NULL AFTER token,
+      ADD INDEX IF NOT EXISTS idx_app_role (app_role)
+    `);
+    console.log('✅ Ensured user_tokens.app_role column exists');
+
+    // Ensure expires_at allows NULL
+    await connection.execute(`
+      ALTER TABLE user_tokens
+      MODIFY COLUMN expires_at DATETIME NULL
+    `);
+    console.log('✅ Ensured user_tokens.expires_at allows NULL');
+
     console.log('🎉 Database setup completed successfully!');
 
   } catch (error) {

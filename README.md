@@ -2,6 +2,12 @@
 
 Backend API cho hệ thống IoT Platform được xây dựng với Node.js, Express, MySQL và MQTT.
 
+This backend uses JWT for authentication. Tokens are persisted in `user_tokens` table to enable server-side revocation and expiry checks. Middleware validates that a token is both cryptographically valid and active in the database.
+
+- Issue token: on register/login/refresh a row is inserted into `user_tokens` with `expires_at`.
+- Validate token: every protected route checks `user_tokens` for `revoked = false` and `expires_at > NOW()`.
+- Logout: current token is marked revoked, immediately invalidating it.
+
 ## 🚀 Tính năng
 
 - ✅ **Authentication & Authorization**: JWT-based authentication

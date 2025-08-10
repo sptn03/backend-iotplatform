@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const db = require('../config/database');
+const TokenModel = require('../models/tokenModel');
 
 const authMiddleware = async (req, res, next) => {
   try {
@@ -18,9 +19,15 @@ const authMiddleware = async (req, res, next) => {
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
+    // Validate token against DB (not revoked and not expired)
+    const isActive = await TokenModel.isTokenActive({ userId: decoded.userId, token });
+    if (!isActive) {
+      return res.status(401).json({ success: false, message: 'Token is revoked or expired.' });
+    }
+    
     // Get user from database
     const users = await db.query(
-      'SELECT id, email, first_name, last_name, is_active FROM users WHERE id = ? AND is_active = true',
+      'SELECT id, email, first_name, last_name, is_active, role FROM users WHERE id = ? AND is_active = true',
       [decoded.userId]
     );
 
@@ -31,8 +38,9 @@ const authMiddleware = async (req, res, next) => {
       });
     }
 
-    // Add user to request object
+    // Add user and token to request object
     req.user = users[0];
+    req.token = token;
     next();
 
   } catch (error) {
@@ -71,8 +79,15 @@ const optionalAuth = async (req, res, next) => {
     const token = authHeader.substring(7);
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     
+    // Validate token against DB
+    const isActive = await TokenModel.isTokenActive({ userId: decoded.userId, token });
+    if (!isActive) {
+      req.user = null;
+      return next();
+    }
+
     const users = await db.query(
-      'SELECT id, email, first_name, last_name, is_active FROM users WHERE id = ? AND is_active = true',
+      'SELECT id, email, first_name, last_name, is_active, role FROM users WHERE id = ? AND is_active = true',
       [decoded.userId]
     );
 

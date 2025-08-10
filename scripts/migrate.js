@@ -21,12 +21,20 @@ async function migrate() {
     await connection.execute('DROP TABLE IF EXISTS smart_home_integrations');
     await connection.execute('DROP TABLE IF EXISTS devices');
     await connection.execute('DROP TABLE IF EXISTS esp32_boards');
+    // Do not drop users or user_tokens
     await connection.execute('SET FOREIGN_KEY_CHECKS = 1');
     console.log('✅ Dropped old tables');
 
+    // Ensure users.role exists
+    await connection.execute(`
+      ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS role ENUM('admin','user') NOT NULL DEFAULT 'user'
+    `);
+    console.log('✅ Ensured users.role exists');
+
     // Create esp32_boards table (physical ESP32 chips)
     await connection.execute(`
-      CREATE TABLE esp32_boards (
+      CREATE TABLE IF NOT EXISTS esp32_boards (
         id INT PRIMARY KEY AUTO_INCREMENT,
         board_id VARCHAR(50) UNIQUE NOT NULL,
         mac_address VARCHAR(17) UNIQUE,
@@ -50,7 +58,7 @@ async function migrate() {
 
     // Create devices table (logical devices on GPIO pins)
     await connection.execute(`
-      CREATE TABLE devices (
+      CREATE TABLE IF NOT EXISTS devices (
         id INT PRIMARY KEY AUTO_INCREMENT,
         device_id VARCHAR(50) NOT NULL,
         board_id VARCHAR(50) NOT NULL,
@@ -73,7 +81,7 @@ async function migrate() {
 
     // Create device_data table (sensor readings, state history)
     await connection.execute(`
-      CREATE TABLE device_data (
+      CREATE TABLE IF NOT EXISTS device_data (
         id INT PRIMARY KEY AUTO_INCREMENT,
         device_id VARCHAR(50) NOT NULL,
         data_type ENUM('state', 'sensor', 'heartbeat', 'error') NOT NULL,
@@ -89,7 +97,7 @@ async function migrate() {
 
     // Create device_commands table (track commands sent to devices)
     await connection.execute(`
-      CREATE TABLE device_commands (
+      CREATE TABLE IF NOT EXISTS device_commands (
         id INT PRIMARY KEY AUTO_INCREMENT,
         device_id VARCHAR(50) NOT NULL,
         command_type ENUM('control', 'config', 'add_device', 'remove_device', 'update_device') NOT NULL,
@@ -106,6 +114,35 @@ async function migrate() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     console.log('✅ Created device_commands table');
+
+    // Ensure user_tokens table exists and has app_role and nullable expires_at
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS user_tokens (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        token VARCHAR(1024) NOT NULL,
+        app_role VARCHAR(50) NULL,
+        revoked BOOLEAN DEFAULT FALSE,
+        user_agent VARCHAR(255),
+        ip_address VARCHAR(45),
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        revoked_at TIMESTAMP NULL,
+        expires_at DATETIME NULL,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        INDEX idx_user_id (user_id),
+        INDEX idx_token (token(255)),
+        INDEX idx_revoked (revoked),
+        INDEX idx_expires_at (expires_at),
+        INDEX idx_app_role (app_role)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    await connection.execute(`
+      ALTER TABLE user_tokens
+      MODIFY COLUMN expires_at DATETIME NULL,
+      ADD COLUMN IF NOT EXISTS app_role VARCHAR(50) NULL AFTER token,
+      ADD INDEX IF NOT EXISTS idx_app_role (app_role)
+    `);
+    console.log('✅ Ensured user_tokens table and nullable expires_at and app_role column exist');
 
     console.log('🎉 Database migration completed successfully!');
 
