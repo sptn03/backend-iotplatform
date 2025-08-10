@@ -12,7 +12,7 @@ class MQTTService {
 
   async initialize() {
     try {
-      const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtt://localhost:1883';
+      const brokerUrl = process.env.MQTT_BROKER_URL || 'mqtt://mqtt.nz03.com:1883';
       const baseClientId = process.env.MQTT_CLIENT_ID || `iot-platform-backend-${os.hostname()}`;
       const options = {
         clientId: `${baseClientId}-${process.pid}-${Math.random().toString(16).slice(2, 6)}`,
@@ -36,7 +36,6 @@ class MQTTService {
 
       this.client.on('connect', (connack) => {
         console.log('✅ MQTT client connected');
-        if (connack) console.log('🔎 ConnAck:', connack);
         this.isConnected = true;
         this.subscribeToDeviceTopics();
         this.subscribe('register', (topic, message) => this.handleRegistration(topic, message));
@@ -85,7 +84,6 @@ class MQTTService {
         this.handleDeviceResponse(deviceId, topic, message);
       });
 
-      console.log(`✅ Subscribed to wildcard topic: resp/+`);
     } catch (error) {
       console.error('❌ Failed to subscribe to device topics:', error);
     }
@@ -194,8 +192,6 @@ class MQTTService {
   handleMessage(topic, message) {
     try {
       const messageStr = message.toString();
-      console.log(`📨 MQTT message received on ${topic}:`, messageStr);
-
       // Try exact topic handler first
       const exactHandler = this.messageHandlers.get(topic);
       if (exactHandler) {
@@ -372,8 +368,6 @@ class MQTTService {
         console.error('❌ Invalid JSON in device response:', payload);
         return;
       }
-
-      console.log(`📥 Device response from ${deviceId}:`, data);
 
       // Handle command acknowledgments
       if (data.type === 'ack' && data.commandId) {
@@ -695,7 +689,6 @@ class MQTTService {
         WHERE board_id = ?
       `, [version, mac, boardId]);
       
-      console.log(`💚 Board ${boardId} is online (fw: ${version || 'n/a'})`);
     } catch (error) {
       console.error('❌ Error updating board status:', error);
     }

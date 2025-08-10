@@ -14,8 +14,8 @@ const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const deviceRoutes = require('./routes/devices');
 const dataRoutes = require('./routes/data');
-const smartHomeRoutes = require('./routes/smartHome');
-const iftttRoutes = require('./routes/ifttt');
+// const smartHomeRoutes = require('./routes/smartHome');
+// const iftttRoutes = require('./routes/ifttt');
 
 // Import middleware
 const errorHandler = require('./middleware/errorHandler');
@@ -71,8 +71,8 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', authMiddleware, userRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api/data', authMiddleware, dataRoutes);
-app.use('/api/smart-home', authMiddleware, smartHomeRoutes);
-app.use('/api/ifttt', iftttRoutes);
+// app.use('/api/smart-home', authMiddleware, smartHomeRoutes);
+// app.use('/api/ifttt', iftttRoutes);
 
 // API documentation
 if (process.env.NODE_ENV !== 'production') {
@@ -99,9 +99,12 @@ async function initializeServices() {
     await db.testConnection();
     console.log('✅ Database connected successfully');
 
-    // Initialize MQTT service
-    await mqttService.initialize();
-    console.log('✅ MQTT service initialized');
+    // Initialize MQTT service (optional during initial run)
+    try {
+      await mqttService.initialize();
+    } catch (e) {
+      console.warn('⚠️ MQTT service failed to initialize. Continuing without MQTT for now.');
+    }
 
     // Start server
     serverRef = app.listen(PORT, () => {

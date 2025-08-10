@@ -8,7 +8,7 @@ Backend API cho hệ thống IoT Platform được xây dựng với Node.js, Ex
 - ✅ **Device Management**: CRUD operations cho IoT devices
 - ✅ **Real-time Communication**: WebSocket và MQTT integration
 - ✅ **Data Analytics**: Sensor data collection và analytics
-- ✅ **Smart Home Integration**: Google Home, Alexa, SmartThings
+- ✅ **Smart Home Integration (Tùy chọn)**: Google Home, Alexa, SmartThings (đang tạm tắt trong cấu hình mặc định)
 - ✅ **API Documentation**: Swagger/OpenAPI documentation
 - ✅ **Security**: Rate limiting, input validation, error handling
 
@@ -81,6 +81,8 @@ npm start
 
 ## 📚 API Documentation
 
+> Lưu ý: Trừ các endpoint `/api/auth/*`, tất cả các endpoint khác yêu cầu JWT Bearer Token trong header `Authorization: Bearer <token>`.
+
 Sau khi khởi động server, truy cập:
 
 - **API Documentation**: http://localhost:3000/api-docs
@@ -107,21 +109,26 @@ GET    /api/users/dashboard   # Lấy dashboard data
 
 ### Devices
 ```
-GET    /api/devices           # Danh sách devices của user
-POST   /api/devices           # Đăng ký device mới
-GET    /api/devices/:id       # Chi tiết device
-PUT    /api/devices/:id       # Cập nhật device
-DELETE /api/devices/:id       # Xóa device
-POST   /api/devices/:id/command    # Gửi lệnh tới device
-GET    /api/devices/:id/status     # Lấy trạng thái device
+# Device APIs
+GET    /api/devices                    # Danh sách devices của user
+POST   /api/devices                    # Thêm device (sau khi ESP32 đã config)
+PUT    /api/devices/:deviceId          # Cập nhật device (tên, config)
+DELETE /api/devices/:deviceId          # Xóa device (soft delete)
+POST   /api/devices/:deviceId/control  # Điều khiển device (gpio/pwm)
+GET    /api/devices/:deviceId/data     # Lịch sử data của device
+
+# Boards (ESP32) APIs
+GET    /api/devices/boards             # Danh sách ESP32 boards của user
+GET    /api/devices/boards/:boardId    # Chi tiết board + devices
+PUT    /api/devices/boards/:boardId    # Cập nhật thông tin board (name/location)
 ```
 
 ### Data
 ```
-GET    /api/data/sensors/:deviceId     # Dữ liệu sensor
-GET    /api/data/commands/:deviceId    # Lịch sử commands
-GET    /api/data/analytics/:deviceId   # Analytics data
-GET    /api/data/export/:deviceId      # Export CSV
+GET    /api/data/sensors/:deviceId     # Dữ liệu sensor (phân trang, filter theo sensor_name, thời gian)
+GET    /api/data/commands/:deviceId    # Lịch sử lệnh (trạng thái: pending/sent/acknowledged/failed)
+GET    /api/data/analytics/:deviceId   # Tổng hợp (avg/min/max, group theo hour/day/week/month)
+GET    /api/data/export/:deviceId      # Export CSV (sensor/status/command)
 ```
 
 ### Smart Home
@@ -135,42 +142,39 @@ POST   /api/smart-home/alexa/directive # Alexa directive handler
 
 ## 🔌 MQTT Integration
 
-Backend tự động kết nối tới MQTT broker và:
+Backend sử dụng mô hình 2-topic đơn giản (tham khảo `firmware/examples/mqtt_simple_commands.md`):
 
-- **Subscribe** tới tất cả device response topics: `resp/[DeviceID]`
-- **Publish** commands tới device command topics: `cmd/[DeviceID]`
-- **Lưu trữ** tất cả sensor data vào database
-- **Broadcast** real-time updates qua WebSocket
+- Publish lệnh: `cmd/{deviceId}`
+- Subscribe phản hồi & dữ liệu: `resp/{deviceId}` (tất cả: ack, gpio_change, sensor, heartbeat, errors)
 
-### MQTT Message Format
-
-#### Command (Backend → Device)
+### Gửi lệnh (Backend → Device)
 ```json
 {
   "action": "gpio",
   "pin": 2,
-  "state": "on",
-  "userId": "user123",
-  "timestamp": "2024-01-15T10:30:00Z"
+  "state": "on"
 }
 ```
 
-#### Response (Device → Backend)
+### Phản hồi chuẩn (Device → Backend)
 ```json
 {
-  "type": "sensor_data",
-  "device_id": "ESP32_ABC123",
-  "user_id": "user123",
-  "sensors": [
-    {
-      "name": "temperature",
-      "value": 25.6,
-      "unit": "°C"
-    }
-  ],
-  "timestamp": "2024-01-15T10:30:00Z"
+  "status": "success",
+  "action": "gpio",
+  "details": {
+    "pin": 2,
+    "state": "HIGH",
+    "message": "GPIO 2 turned on"
+  },
+  "timestamp": 1704108645
 }
 ```
+
+### Theo dõi ACK theo commandId (áp dụng cho add_device/update_device/gpio/pwm)
+- Backend gửi lệnh qua `mqttService.sendCommand(...)` và `waitForAck(...)`.
+- Firmware phản hồi `type: "ack"` kèm `commandId` và `success` để xác nhận.
+- Nếu quá thời gian `timeoutMs`, backend trả lỗi 408.
+
 
 ## 🌐 WebSocket Events
 
