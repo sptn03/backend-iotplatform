@@ -115,10 +115,7 @@ async function initializeServices() {
 
     // Start server
     serverRef = app.listen(PORT, HOST, () => {
-      console.log(`🚀 IoT Platform Backend running on http://${HOST}:${PORT}`);
-      console.log(`📚 API Docs UI (local): http://localhost:${PORT}/api-docs`);
-      console.log(`📄 OpenAPI JSON: http://${HOST}:${PORT}/api-docs.json`);
-      console.log(`🏥 Health Check (local): http://localhost:${PORT}/health`);
+      console.log(`🚀 IoT Platform Backend running on ${PORT}`);
     });
 
   } catch (error) {
