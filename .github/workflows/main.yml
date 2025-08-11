@@ -16,7 +16,7 @@ jobs:
 
       # Upload code -> VPS (loại trừ .git, node_modules, .env, logs)
       - name: Upload to VPS via SCP
-        uses: appleboy/scp-action@v1.0.3
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
