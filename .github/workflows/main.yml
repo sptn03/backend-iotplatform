@@ -1,0 +1,51 @@
+# .github/workflows/deploy.yml
+name: Deploy iot-back to VPS
+
+on:
+  push:
+    branches: [ "main" ]   # Chạy khi push lên main
+  workflow_dispatch:       # Cho phép chạy tay
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency: deploy-iot-back   # Tránh chạy chồng job
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      # Upload code lên VPS nhưng giữ nguyên .env, ecosystem.config.js, logs
+      - name: Upload to VPS via SCP
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: "."
+          target: "/root/backend_iot"
+          strip_components: 0
+          overwrite: true
+          rm: false
+          exclude: ".git,node_modules,.env,ecosystem.config.js,logs"
+
+      # Cài deps & reload PM2
+      - name: Install deps & reload PM2
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          script: |
+            set -e
+            cd /root/backend_iot
+            if [ -f package-lock.json ]; then
+              npm ci --omit=dev
+            else
+              npm i --omit=dev
+            fi
+            # Nếu có bước build thì mở dòng dưới
+            # npm run build
+            pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js --env production
+            pm2 save
