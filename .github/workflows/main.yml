@@ -31,7 +31,7 @@ jobs:
 
       # Cài deps & reload PM2
       - name: Install deps & reload PM2
-        uses: appleboy/ssh-action@v1.0.3
+        uses: appleboy/ssh-action@v1.0.0
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
