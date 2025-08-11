@@ -1,3 +1,4 @@
+# .github/workflows/deploy.yml
 name: Deploy iot-back to VPS
 
 on:
@@ -8,24 +9,27 @@ on:
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    concurrency: deploy-iot-back   # tránh chồng job
+    concurrency: deploy-iot-back
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Đồng bộ code lên VPS bằng rsync (không đụng .env/node_modules/.git)
-      - name: Rsync to VPS
-        uses: burnett01/rsync-deployments@6.0
+      # Upload code -> VPS (loại trừ .git, node_modules, .env, logs)
+      - name: Upload to VPS via SCP
+        uses: appleboy/scp-action@v1.0.3
         with:
-          switches: -avzr --delete --exclude=".git" --exclude="node_modules" --exclude=".env" --exclude="logs"
-          path: .
-          remote_path: /root/backend_iot
-          remote_host: ${{ secrets.SSH_HOST }}
-          remote_user: ${{ secrets.SSH_USER }}
-          remote_port: ${{ secrets.SSH_PORT }}
-          remote_key: ${{ secrets.SSH_KEY }}
+          host: ${{ secrets.SSH_HOST }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_KEY }}
+          port: ${{ secrets.SSH_PORT }}
+          source: "."
+          target: "/root/backend_iot"
+          strip_components: 0
+          rm: true
+          overwrite: true
+          exclude: ".git,node_modules,.env,logs"
 
-      # Cài deps và reload PM2 trên VPS
+      # Cài deps & reload PM2
       - name: Install deps & reload PM2
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -36,14 +40,12 @@ jobs:
           script: |
             set -e
             cd /root/backend_iot
-            # Cài đúng theo lock file, bỏ devDeps ở production
             if [ -f package-lock.json ]; then
               npm ci --omit=dev
             else
               npm i --omit=dev
             fi
-            # Nếu có bước build thì mở dòng sau:
+            # Nếu có build:
             # npm run build
-            # Khởi động/reload PM2
             pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js --env production
             pm2 save
