@@ -20,18 +20,19 @@ const DataModel = {
       queryParams.push(end_date);
     }
 
-    queryParams.push(parseInt(limit), parseInt(offset));
+    const limitNum = Number.isFinite(parseInt(limit, 10)) ? Math.max(1, Math.min(1000, parseInt(limit, 10))) : 100;
+    const offsetNum = Number.isFinite(parseInt(offset, 10)) ? Math.max(0, parseInt(offset, 10)) : 0;
 
     const sensorData = await db.query(`
       SELECT 
         id, data_type, sensor_name, value, unit, raw_data, timestamp
       FROM device_data
       ${whereClause}
-      ORDER BY timestamp DESC
-      LIMIT ? OFFSET ?
+      ORDER BY \`timestamp\` DESC
+      LIMIT ${limitNum} OFFSET ${offsetNum}
     `, queryParams);
 
-    const countParams = queryParams.slice(0, -2);
+    const countParams = queryParams.slice(0);
     const totalResult = await db.query(`
       SELECT COUNT(*) as total
       FROM device_data
@@ -51,7 +52,8 @@ const DataModel = {
       queryParams.push(status);
     }
 
-    queryParams.push(parseInt(limit), parseInt(offset));
+    const limitNum = Number.isFinite(parseInt(limit, 10)) ? Math.max(1, Math.min(1000, parseInt(limit, 10))) : 50;
+    const offsetNum = Number.isFinite(parseInt(offset, 10)) ? Math.max(0, parseInt(offset, 10)) : 0;
 
     const commands = await db.query(`
       SELECT 
@@ -59,10 +61,10 @@ const DataModel = {
       FROM device_commands
       ${whereClause}
       ORDER BY created_at DESC
-      LIMIT ? OFFSET ?
+      LIMIT ${limitNum} OFFSET ${offsetNum}
     `, queryParams);
 
-    const countParams = queryParams.slice(0, -2);
+    const countParams = queryParams.slice(0);
     const totalResult = await db.query(`
       SELECT COUNT(*) as total
       FROM device_commands

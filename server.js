@@ -8,6 +8,7 @@ require('dotenv').config();
 
 const db = require('./config/database');
 const mqttService = require('./services/mqttService');
+const swaggerSpec = require('./config/swagger');
 
 // Import routes
 const authRoutes = require('./routes/auth');
@@ -25,6 +26,7 @@ const app = express();
 let serverRef = null;
 
 const PORT = process.env.PORT || 3000;
+const HOST = process.env.HOST || '0.0.0.0';
 
 // Security middleware
 app.use(helmet());
@@ -66,6 +68,12 @@ app.get('/health', (req, res) => {
   });
 });
 
+// Expose raw OpenAPI spec for Postman import
+app.get('/api-docs.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
+
 // API routes
 app.use('/api/auth', authRoutes);
 app.use('/api/users', authMiddleware, userRoutes);
@@ -77,7 +85,6 @@ app.use('/api/data', authMiddleware, dataRoutes);
 // API documentation
 if (process.env.NODE_ENV !== 'production') {
   const swaggerUi = require('swagger-ui-express');
-  const swaggerSpec = require('./config/swagger');
   app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 }
 
@@ -107,10 +114,11 @@ async function initializeServices() {
     }
 
     // Start server
-    serverRef = app.listen(PORT, () => {
-      console.log(`🚀 IoT Platform Backend running on port ${PORT}`);
-      console.log(`📚 API Documentation: http://localhost:${PORT}/api-docs`);
-      console.log(`🏥 Health Check: http://localhost:${PORT}/health`);
+    serverRef = app.listen(PORT, HOST, () => {
+      console.log(`🚀 IoT Platform Backend running on http://${HOST}:${PORT}`);
+      console.log(`📚 API Docs UI (local): http://localhost:${PORT}/api-docs`);
+      console.log(`📄 OpenAPI JSON: http://${HOST}:${PORT}/api-docs.json`);
+      console.log(`🏥 Health Check (local): http://localhost:${PORT}/health`);
     });
 
   } catch (error) {
@@ -118,17 +126,6 @@ async function initializeServices() {
     process.exit(1);
   }
 }
-
-// Graceful shutdown
-process.on('SIGTERM', async () => {
-  console.log('SIGTERM received, shutting down gracefully');
-  if (serverRef) serverRef.close(() => { console.log('Process terminated'); });
-});
-
-process.on('SIGINT', async () => {
-  console.log('SIGINT received, shutting down gracefully');
-  if (serverRef) serverRef.close(() => { console.log('Process terminated'); });
-});
 
 // Start the application
 if (require.main === module) {

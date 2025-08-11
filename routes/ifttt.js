@@ -146,14 +146,16 @@ router.post('/triggers/sensor_threshold_reached', authMiddleware, async (req, re
         comparisonOp = '>';
     }
 
+    const safeLimit = Number.isFinite(parseInt(limit, 10)) ? Math.max(1, Math.min(1000, parseInt(limit, 10))) : 50;
+
     // Get sensor data that meets threshold
     const sensorData = await db.query(`
       SELECT value, unit, timestamp
       FROM device_data
       WHERE device_id = ? AND sensor_name = ? AND value ${comparisonOp} ?
-      ORDER BY timestamp DESC
-      LIMIT ?
-    `, [device.id, sensor_name, threshold_value, limit]);
+      ORDER BY \`timestamp\` DESC
+      LIMIT ${safeLimit}
+    `, [device.id, sensor_name, threshold_value]);
 
     // Format for IFTTT
     const triggerEvents = sensorData.map(data => ({

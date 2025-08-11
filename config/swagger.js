@@ -22,7 +22,7 @@ const options = {
         description: 'Development server'
       },
       {
-        url: 'https://api.iotplatform.com',
+        url: 'http://n8n.nz03.com:3000',
         description: 'Production server'
       }
     ],

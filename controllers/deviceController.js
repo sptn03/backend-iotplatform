@@ -187,7 +187,8 @@ const DeviceController = {
   async getDeviceData(req, res) {
     try {
       const { deviceId } = req.params;
-      const limit = parseInt(req.query.limit) || 100;
+      const limitRaw = parseInt(req.query.limit, 10);
+      const safeLimit = Number.isFinite(limitRaw) ? Math.max(1, Math.min(1000, limitRaw)) : 100;
       const dataType = req.query.data_type;
 
       const [device] = await db.query(`
@@ -200,9 +201,13 @@ const DeviceController = {
 
       let query = `SELECT * FROM device_data WHERE device_id = ?`;
       const params = [deviceId];
-      if (dataType) { query += ` AND data_type = ?`; params.push(dataType); }
-      query += ` ORDER BY timestamp DESC LIMIT ?`;
-      params.push(limit);
+      if (dataType) {
+        query += ` AND data_type = ?`;
+        params.push(dataType);
+      }
+      // Escape timestamp column and inline sanitized limit to avoid prepared LIMIT placeholder issue
+      query += ` ORDER BY \`timestamp\` DESC LIMIT ${safeLimit}`;
+
       const data = await db.query(query, params);
 
       res.json({ success: true, data });
