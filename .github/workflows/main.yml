@@ -3,20 +3,20 @@ name: Deploy iot-back to VPS
 
 on:
   push:
-    branches: [ "main" ]
-  workflow_dispatch:
+    branches: [ "main" ]   # Chạy khi push lên main
+  workflow_dispatch:       # Cho phép chạy tay
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
-    concurrency: deploy-iot-back
+    concurrency: deploy-iot-back   # Tránh chạy chồng job
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
 
-      # Upload code -> VPS (loại trừ .git, node_modules, .env, logs)
+      # Upload code lên VPS nhưng giữ nguyên .env, ecosystem.config.js, logs
       - name: Upload to VPS via SCP
-        uses: appleboy/scp-action@v1.0.0
+        uses: appleboy/scp-action@master
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -25,13 +25,13 @@ jobs:
           source: "."
           target: "/root/backend_iot"
           strip_components: 0
-          rm: true
           overwrite: true
-          exclude: ".git,node_modules,.env,logs"
+          rm: false
+          exclude: ".git,node_modules,.env,ecosystem.config.js,logs"
 
       # Cài deps & reload PM2
       - name: Install deps & reload PM2
-        uses: appleboy/ssh-action@v1.0.0
+        uses: appleboy/ssh-action@master
         with:
           host: ${{ secrets.SSH_HOST }}
           username: ${{ secrets.SSH_USER }}
@@ -45,7 +45,7 @@ jobs:
             else
               npm i --omit=dev
             fi
-            # Nếu có build:
+            # Nếu có bước build thì mở dòng dưới
             # npm run build
             pm2 reload ecosystem.config.js --update-env || pm2 start ecosystem.config.js --env production
             pm2 save
