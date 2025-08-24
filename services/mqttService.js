@@ -84,6 +84,13 @@ class MQTTService {
         this.handleDeviceResponse(deviceId, topic, message);
       });
 
+      // Subscribe to device sync topics
+      this.subscribe('cmd/+', (topic, message) => {
+        // Extract deviceId from topic: cmd/ESP32_XXX -> ESP32_XXX
+        const deviceId = topic.split('/')[1];
+        this.handleDeviceCommand(deviceId, topic, message);
+      });
+
     } catch (error) {
       console.error('❌ Failed to subscribe to device topics:', error);
     }
@@ -785,6 +792,151 @@ class MQTTService {
       console.log(`✅ Registration ack sent to ${replyTopic} (${ack.status})`);
     } catch (error) {
       console.error('❌ Error handling registration:', error);
+    }
+  }
+
+  // ===== DEVICE SYNC HANDLERS =====
+
+  async handleDeviceCommand(deviceId, topic, message) {
+    try {
+      const payload = typeof message === 'string' ? message : message.toString();
+      let data;
+      try {
+        data = JSON.parse(payload);
+      } catch (e) {
+        console.warn('⚠️ Invalid device command JSON:', payload);
+        return;
+      }
+
+      const action = data.action;
+      console.log(`📥 Device command from ${deviceId}: ${action}`);
+
+      switch (action) {
+        case 'device_sync':
+          await this.handleDeviceSync(deviceId, data);
+          break;
+        case 'device_request':
+          await this.handleDeviceRequest(deviceId, data);
+          break;
+        default:
+          console.log(`⚠️ Unknown device command action: ${action}`);
+      }
+    } catch (error) {
+      console.error('❌ Error handling device command:', error);
+    }
+  }
+
+  async handleDeviceSync(deviceId, data) {
+    try {
+      console.log(`📤 Device sync from ${deviceId}: ${data.devices?.length || 0} devices`);
+      
+      // Save devices to database
+      if (data.devices && Array.isArray(data.devices)) {
+        for (const device of data.devices) {
+          await this.saveDeviceToDatabase(deviceId, device);
+        }
+      }
+
+      // Send device list from database back to ESP32
+      await this.sendDeviceListToESP32(deviceId);
+      
+    } catch (error) {
+      console.error('❌ Error handling device sync:', error);
+    }
+  }
+
+  async handleDeviceRequest(deviceId, data) {
+    try {
+      console.log(`📥 Device list request from ${deviceId}`);
+      
+      // Send device list from database to ESP32
+      await this.sendDeviceListToESP32(deviceId);
+      
+    } catch (error) {
+      console.error('❌ Error handling device request:', error);
+    }
+  }
+
+  async saveDeviceToDatabase(boardId, device) {
+    try {
+      // Check if device exists
+      const existing = await db.query(
+        'SELECT id FROM devices WHERE board_id = ? AND device_id = ?',
+        [boardId, device.device_id]
+      );
+
+      if (existing.length > 0) {
+        // Update existing device
+        await db.query(`
+          UPDATE devices 
+          SET name = ?, device_type = ?, gpio_pin = ?, config = ?, state = ?, updated_at = NOW()
+          WHERE board_id = ? AND device_id = ?
+        `, [
+          device.name,
+          device.device_type,
+          device.gpio_pin,
+          JSON.stringify(device.config || {}),
+          JSON.stringify(device.state || {}),
+          boardId,
+          device.device_id
+        ]);
+        console.log(`✅ Device updated: ${device.device_id}`);
+      } else {
+        // Insert new device
+        await db.query(`
+          INSERT INTO devices (board_id, device_id, name, device_type, gpio_pin, config, state, is_enabled, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, NOW(), NOW())
+        `, [
+          boardId,
+          device.device_id,
+          device.name,
+          device.device_type,
+          device.gpio_pin,
+          JSON.stringify(device.config || {}),
+          JSON.stringify(device.state || {}),
+          device.is_enabled !== false ? 1 : 0
+        ]);
+        console.log(`✅ Device added: ${device.device_id}`);
+      }
+    } catch (error) {
+      console.error('❌ Error saving device to database:', error);
+    }
+  }
+
+  async sendDeviceListToESP32(deviceId) {
+    try {
+      // Get devices from database for this board
+      const devices = await db.query(`
+        SELECT device_id, name, device_type, gpio_pin, config, state, is_enabled
+        FROM devices 
+        WHERE board_id = ? AND is_enabled = 1
+        ORDER BY created_at
+      `, [deviceId]);
+
+      // Format devices for ESP32
+      const deviceList = devices.map(d => ({
+        device_id: d.device_id,
+        name: d.name,
+        device_type: d.device_type,
+        gpio_pin: d.gpio_pin,
+        is_enabled: d.is_enabled === 1,
+        config: typeof d.config === 'string' ? JSON.parse(d.config) : d.config,
+        state: typeof d.state === 'string' ? JSON.parse(d.state) : d.state
+      }));
+
+      // Send device list response
+      const response = {
+        action: 'device_list_response',
+        device_id: deviceId,
+        timestamp: Date.now(),
+        devices: deviceList
+      };
+
+      await this.publish(`cmd/${deviceId}`, response);
+      console.log(`📤 Device list sent to ${deviceId}: ${deviceList.length} devices`);
+      
+    } catch (error) {
+      console.error('❌ Error sending device list to ESP32:', error);
     }
   }
 
