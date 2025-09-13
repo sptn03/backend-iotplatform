@@ -1,5 +1,8 @@
 # IoT Platform Backend
 
+## Tác giả
+- Dương Văn Nam
+- Nguyễn Duy Hoàng
 
 ## 🚀 Tính năng
 
