@@ -23,8 +23,22 @@ const UserController = {
         return res.status(400).json({ success: false, message: 'Validation failed', errors: errors.array() });
       }
 
-      const { first_name, last_name, phone } = req.body;
-      const result = await UserModel.updateProfile(req.user.id, { first_name, last_name, phone });
+      const updateData = {};
+      if (req.body.first_name !== undefined) {
+        updateData.first_name = req.body.first_name;
+      }
+      if (req.body.last_name !== undefined) {
+        updateData.last_name = req.body.last_name;
+      }
+      if (req.body.phone !== undefined) {
+        updateData.phone = req.body.phone;
+      }
+
+      if (Object.keys(updateData).length === 0) {
+        return res.status(400).json({ success: false, message: 'No fields to update' });
+      }
+
+      const result = await UserModel.updateProfile(req.user.id, updateData);
       if (result.affectedRows === 0) {
         return res.status(400).json({ success: false, message: 'No fields to update' });
       }
