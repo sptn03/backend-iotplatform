@@ -15,6 +15,7 @@ async function migrate() {
 
     // Drop existing tables in correct order (child tables first)
     await connection.execute('SET FOREIGN_KEY_CHECKS = 0');
+    await connection.execute('DROP TABLE IF EXISTS timers');
     await connection.execute('DROP TABLE IF EXISTS device_commands');
     await connection.execute('DROP TABLE IF EXISTS device_data');
     await connection.execute('DROP TABLE IF EXISTS device_sharing');
@@ -114,6 +115,28 @@ async function migrate() {
       ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
     `);
     console.log('✅ Created device_commands table');
+
+    // Create timers table
+    await connection.execute(`
+      CREATE TABLE IF NOT EXISTS timers (
+        id INT PRIMARY KEY AUTO_INCREMENT,
+        user_id INT NOT NULL,
+        device_id VARCHAR(50) NOT NULL,
+        name VARCHAR(100) NOT NULL,
+        cron_expression VARCHAR(50) NOT NULL,
+        action ENUM('turn_on', 'turn_off', 'toggle', 'set_value') NOT NULL,
+        value INT,
+        is_enabled BOOLEAN DEFAULT TRUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (device_id) REFERENCES devices(device_id) ON DELETE CASCADE,
+        INDEX idx_user_id (user_id),
+        INDEX idx_device_id (device_id),
+        INDEX idx_is_enabled (is_enabled)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+    `);
+    console.log('✅ Created timers table');
 
     // Ensure user_tokens table exists and has app_role and nullable expires_at
     await connection.execute(`
