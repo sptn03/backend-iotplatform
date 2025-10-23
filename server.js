@@ -8,6 +8,7 @@ require('dotenv').config();
 
 const db = require('./config/database');
 const mqttService = require('./services/mqttService');
+const timerService = require('./services/timerService');
 const swaggerSpec = require('./config/swagger');
 
 // Import routes
@@ -15,6 +16,7 @@ const authRoutes = require('./routes/auth');
 const userRoutes = require('./routes/users');
 const deviceRoutes = require('./routes/devices');
 const dataRoutes = require('./routes/data');
+const timerRoutes = require('./routes/timer');
 // const smartHomeRoutes = require('./routes/smartHome');
 // const iftttRoutes = require('./routes/ifttt');
 
@@ -79,6 +81,7 @@ app.use('/api/auth', authRoutes);
 app.use('/api/users', authMiddleware, userRoutes);
 app.use('/api/devices', authMiddleware, deviceRoutes);
 app.use('/api/data', authMiddleware, dataRoutes);
+app.use('/api/timers', authMiddleware, timerRoutes);
 // app.use('/api/smart-home', authMiddleware, smartHomeRoutes);
 // app.use('/api/ifttt', iftttRoutes);
 
@@ -109,6 +112,7 @@ async function initializeServices() {
     // Initialize MQTT service (optional during initial run)
     try {
       await mqttService.initialize();
+      await timerService.start();
     } catch (e) {
       console.warn('⚠️ MQTT service failed to initialize. Continuing without MQTT for now.');
     }
